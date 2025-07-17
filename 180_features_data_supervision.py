@@ -64,3 +64,74 @@ for h in next_horizons:
 
 print("✅ All targets merged. Final shape:", df_lagged.shape)
 
+
+
+# ====== chunk approach ===
+
+import pandas as pd
+import numpy as np
+
+# Parameters
+horizon = 20
+lookback = 60
+file_path = f"C:/Users/YourName/Downloads/180_features_selected_t+{horizon}.csv"
+chunk_size = 50000  # Adjust based on available memory
+
+# Load the data
+df = pd.read_csv(file_path, parse_dates=['date'])
+df.sort_values(['ric', 'date'], inplace=True)
+
+# Get unique 'ric' values
+ric_values = df['ric'].unique()
+
+# Number of ric values per chunk
+ric_chunk_size = 100  # Choose a value based on your system memory
+
+# Split the ric_values into smaller chunks
+ric_chunks = [ric_values[i:i + ric_chunk_size] for i in range(0, len(ric_values), ric_chunk_size)]
+
+# Initialize an empty list to hold the final df_lagged
+final_df_lagged = []
+
+# Process the data in chunks by 'ric'
+for ric_chunk in ric_chunks:
+    # Filter the dataframe for the current chunk of 'ric' values
+    df_chunk = df[df['ric'].isin(ric_chunk)]
+    
+    # Identify features to lag
+    exclude_cols = ['date', 'ric', f'utilization_t+{horizon}']
+    feature_cols = [col for col in df_chunk.columns if col not in exclude_cols]
+    
+    # Downcast to float32 to save memory
+    df_chunk[feature_cols] = df_chunk[feature_cols].astype(np.float32)
+
+    # Initialize df_lagged with index and core columns only
+    df_lagged = df_chunk[['date', 'ric', f'utilization_t+{horizon}']].copy()
+
+    # Generate lagged features in-place for each chunk
+    for lag in range(1, lookback + 1):
+        lagged = df_chunk.groupby('ric')[feature_cols].shift(lag)
+        lagged.columns = [f'{col}_lag{lag}' for col in feature_cols]
+        lagged = lagged.astype(np.float32)  # cast early
+        df_lagged = pd.concat([df_lagged, lagged], axis=1)
+
+    # Drop rows with NaNs (only relevant for rows that are beyond the lookback period)
+    df_lagged.dropna(inplace=True)
+    
+    # Append the processed chunk to the final_df_lagged list
+    final_df_lagged.append(df_lagged)
+
+    # Optional: periodically free up memory
+    del df_chunk
+
+# Concatenate all chunks into a single dataframe
+df_lagged_final = pd.concat(final_df_lagged, axis=0)
+
+# Final cleanup
+df_lagged_final.reset_index(drop=True, inplace=True)
+
+# Save to a CSV file
+output_path = f"C:/Users/YourName/Downloads/df_lagged_final_t+{horizon}.csv"
+df_lagged_final.to_csv(output_path, index=False)
+
+print("✅ Lagging complete. Final dataframe saved to:", output_path)
