@@ -90,8 +90,8 @@ ric_chunk_size = 100  # Choose a value based on your system memory
 # Split the ric_values into smaller chunks
 ric_chunks = [ric_values[i:i + ric_chunk_size] for i in range(0, len(ric_values), ric_chunk_size)]
 
-# Initialize an empty list to hold the final df_lagged
-final_df_lagged = []
+# Initialize the final df_lagged (empty DataFrame)
+df_lagged_final = pd.DataFrame()
 
 # Process the data in chunks by 'ric'
 for ric_chunk in ric_chunks:
@@ -118,14 +118,12 @@ for ric_chunk in ric_chunks:
     # Drop rows with NaNs (only relevant for rows that are beyond the lookback period)
     df_lagged.dropna(inplace=True)
     
-    # Append the processed chunk to the final_df_lagged list
-    final_df_lagged.append(df_lagged)
+    # Directly concatenate this chunk with the final dataframe
+    df_lagged_final = pd.concat([df_lagged_final, df_lagged], axis=0)
 
-    # Optional: periodically free up memory
+    # Optional: free up memory
     del df_chunk
-
-# Concatenate all chunks into a single dataframe
-df_lagged_final = pd.concat(final_df_lagged, axis=0)
+    del df_lagged  # Delete df_lagged after each loop iteration
 
 # Final cleanup
 df_lagged_final.reset_index(drop=True, inplace=True)
@@ -135,3 +133,4 @@ output_path = f"C:/Users/YourName/Downloads/df_lagged_final_t+{horizon}.csv"
 df_lagged_final.to_csv(output_path, index=False)
 
 print("✅ Lagging complete. Final dataframe saved to:", output_path)
+
