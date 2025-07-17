@@ -35,3 +35,23 @@ y = df_lagged[f'utilization_t+{horizon}']
 
 print("✅ Feature matrix shape:", X.shape)
 print("✅ Target vector shape:", y.shape)
+
+
+# ===== merge other utilization_t+horizon onto the lagged df ======
+
+next_horizons = [1, 5, 10, 15]
+
+for h in next_horizons:
+    target_file = f"C:/Users/YourName/Downloads/target_extracted_{h}.csv"
+    
+    # Load only necessary columns
+    target_df = pd.read_csv(target_file, parse_dates=['date'])
+    
+    target_col = f'utilization_t+{h}'
+    target_df = target_df[['date', 'ric', target_col]]
+    
+    # Merge target into df_lagged
+    df_lagged = df_lagged.merge(target_df, on=['date', 'ric'], how='left')
+
+print("✅ All targets merged. Final shape:", df_lagged.shape)
+
