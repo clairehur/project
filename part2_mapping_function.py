@@ -1,6 +1,9 @@
 import pandas as pd
 import numpy as np
 from scipy.interpolate import LinearNDInterpolator
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import random
 
 # ======= LOAD FILES =======
 
@@ -74,7 +77,7 @@ def predict_z(pred_df, df, interpolator, scales):
     pred_df = pred_df.merge(df_indexed, on=['date', 'ric'], how='left')
 
     results = []
-    for scale in scales:
+    for scale in tqdm(scales, desc="Interpolating"):
         y_input = (pred_df['efp_avail_qty'] * scale) / (
             (pred_df['total_avail_qty'] - pred_df['efp_avail_qty']) + (pred_df['efp_avail_qty'] * scale)
         )
@@ -90,6 +93,35 @@ def predict_z(pred_df, df, interpolator, scales):
     return pd.concat(results, ignore_index=True)
 
 
+# ======= RANDOM SAMPLE PLOT =======
+
+def plot_random_points(pred_df, df, interpolator):
+    df_indexed = df[['date', 'ric', 'efp_avail_qty', 'total_avail_qty']].drop_duplicates()
+    pred_df = pred_df.merge(df_indexed, on=['date', 'ric'], how='left')
+
+    sample = pred_df.dropna(subset=['efp_avail_qty', 'total_avail_qty', 'y_pred'])
+    sampled_rows = sample.sample(n=5, random_state=42)
+
+    for _, row in sampled_rows.iterrows():
+        date = row['date']
+        ric = row['ric']
+        x_input = row['y_pred']
+        efp_avail_qty = row['efp_avail_qty']
+        total_avail_qty = row['total_avail_qty']
+
+        scales = [0.5, 1.0, 1.5, 2.0, 2.5]
+        y_inputs = [(efp_avail_qty * s) / ((total_avail_qty - efp_avail_qty) + (efp_avail_qty * s)) for s in scales]
+        z_estimated = interpolator([x_input]*len(scales), y_inputs)
+
+        plt.figure()
+        plt.plot([50, 100, 150, 200, 250], z_estimated, marker='o')
+        plt.title(f"RIC: {ric}, Date: {date}")
+        plt.xlabel("EFP Avail Qty Change (%)")
+        plt.ylabel("EFP Usage %")
+        plt.grid(True)
+        plt.show()
+
+
 # ======= MAIN RUNNER =======
 
 def main():
@@ -98,9 +130,8 @@ def main():
     df = clean_data(df)
     interp = build_mapping(df)
 
-    scales = [0.5, 1, 1.5, 2, 2.5]
-    results_df = predict_z(data['pred'], df, interp, scales)
-    print(results_df)
+    # Skip predict_z and go straight to plotting
+    plot_random_points(data['pred'], df, interp)
 
 
 if __name__ == '__main__':
