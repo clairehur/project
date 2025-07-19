@@ -23,20 +23,20 @@ def objective(trial):
         "lambda": trial.suggest_float("lambda", 0.01, 1.0),
         "alpha": trial.suggest_float("alpha", 0.01, 1.0),
         "use_label_encoder": False,
-        "objective": "multi:softprob"
+        "objective": "multi:softprob",
+        "eval_metric": "mlogloss"
     }
 
     model = xgb.XGBClassifier(**params, num_class=len(bin_centers))
 
-    evals_result = {}
     model.fit(
         X_train, y_train_binned,
         eval_set=[(X_train, y_train_binned), (X_val, y_val_binned)],
         early_stopping_rounds=10,
-        verbose=False,
-        eval_metric="mlogloss",
-        evals_result=evals_result
+        verbose=False
     )
+
+    evals_result = model.evals_result()
 
     probs_val = model.predict_proba(X_val)
     y_val_pred_continuous = np.dot(probs_val, bin_centers)
@@ -74,7 +74,7 @@ pd.DataFrame([best_params]).to_csv(
     os.path.join(output_dir, 'optuna_best_trial.csv'), index=False)
 
 # Train final model on best params
-final_model = xgb.XGBClassifier(**study.best_trial.params, num_class=len(bin_centers))
+final_model = xgb.XGBClassifier(**study.best_trial.params, num_class=len(bin_centers), eval_metric="mlogloss")
 final_model.fit(
     X_train, y_train_binned,
     eval_set=[(X_val, y_val_binned)],
