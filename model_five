@@ -1,0 +1,48 @@
+def objective(trial):
+    # Suggest hyperparameters
+    max_depth = trial.suggest_int("max_depth", 3, 10)
+    eta = trial.suggest_float("eta", 0.01, 0.3, log=True)
+    subsample = trial.suggest_float("subsample", 0.6, 1.0)
+    colsample_bytree = trial.suggest_float("colsample_bytree", 0.6, 1.0)
+    reg_lambda = trial.suggest_float("lambda", 1e-3, 10.0, log=True)
+
+    # Fixed params + suggested ones
+    params = {
+        "num_class": K,
+        "eval_metric": "mlogloss",  # logging only
+        "max_depth": max_depth,
+        "eta": eta,
+        "subsample": subsample,
+        "colsample_bytree": colsample_bytree,
+        "lambda": reg_lambda
+    }
+
+    # Prepare data in DMatrix
+    dtrain = xgb.DMatrix(X_train_normalized, label=y_train_binned)
+    dval = xgb.DMatrix(X_val_normalized, label=y_val_binned)
+
+    # Train with custom EMD loss
+    model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=500,
+        evals=[(dval, 'val')],
+        early_stopping_rounds=20,
+        verbose_eval=False,
+        obj=cdf_emd_loss  # ← Custom loss function
+    )
+
+    # Predict class probabilities and compute expected value
+    probs_val = model.predict(dval)  # shape: (n_val, K)
+    y_pred_val = np.dot(probs_val, bin_centers)  # shape: (n_val,)
+    
+    # Evaluate regression metric on continuous labels
+    return mean_squared_error(y_val, y_pred_val, squared=False)  # RMSE
+
+import optuna
+
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=50)
+
+print("Best trial:")
+print(study.best_trial.params)
