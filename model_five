@@ -34,17 +34,20 @@ def train_with_emd(X_train, y_train, X_val, y_val, params, K=5):
     dtrain = xgb.DMatrix(X_train, label=y_train)
     dval = xgb.DMatrix(X_val, label=y_val)
 
+    # Use evals_result to capture log loss
+    evals_result = {}
     model = xgb.train(
         params,
         dtrain,
         num_boost_round=params.get('num_boost_round', 500),
-        evals=[(dval, 'val')],
+        evals=[(dtrain, 'train'), (dval, 'val')],
         early_stopping_rounds=20,
         verbose_eval=False,
-        obj=cdf_emd_loss
+        obj=cdf_emd_loss,
+        evals_result=evals_result
     )
 
-    return model
+    return model, evals_result
 
 def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_centers):
     params = {
@@ -59,10 +62,25 @@ def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_ce
         'num_boost_round': trial.suggest_int('num_boost_round', 100, 1000)
     }
 
-    model = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, params, K=5)
-    probs_val = model.predict(xgb.DMatrix(X_val))
+    # Train model and get evaluation results
+    model, evals_result = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, params, K=5)
+    
+    # Extract log loss for the last iteration
+    train_mlogloss = evals_result['train']['mlogloss'][-1]
+    val_mlogloss = evals_result['val']['mlogloss'][-1]
+
+    # Predict and calculate RMSE
+    logits_val = model.predict(xgb.DMatrix(X_val), output_margin=True)
+    n_samples_val = X_val.shape[0]
+    logits_val = logits_val.reshape(n_samples_val, 5)
+    exps_val = np.exp(logits_val - np.max(logits_val, axis=1, keepdims=True))
+    probs_val = exps_val / np.sum(exps_val, axis=1, keepdims=True)
     y_val_pred_cont = np.dot(probs_val, bin_centers)
     rmse = mean_squared_error(y_val, y_val_pred_cont, squared=False)
+
+    # Store log loss for this trial
+    trial.set_user_attr('train_mlogloss', train_mlogloss)
+    trial.set_user_attr('val_mlogloss', val_mlogloss)
 
     return rmse
 
@@ -127,22 +145,19 @@ for horizon in horizons:
     best_params = study.best_params
     best_params['num_class'] = 5
     best_params['eval_metric'] = 'mlogloss'
-    model = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, best_params, K=5)
+    model, evals_result = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, best_params, K=5)
 
-    # Predict logits
+    # Predict logits and calculate probabilities
     logits_val = model.predict(xgb.DMatrix(X_val), output_margin=True)
     logits_test = model.predict(xgb.DMatrix(X_test), output_margin=True)
 
-    # Reshape logits to (n_samples, K)
-    n_samples_val = X_val.shape[0]  # 329750
+    n_samples_val = X_val.shape[0]
     n_samples_test = X_test.shape[0]
     logits_val = logits_val.reshape(n_samples_val, 5)
     logits_test = logits_test.reshape(n_samples_test, 5)
 
-    # Apply softmax manually to get probabilities
     exps_val = np.exp(logits_val - np.max(logits_val, axis=1, keepdims=True))
     probs_val = exps_val / np.sum(exps_val, axis=1, keepdims=True)
-
     exps_test = np.exp(logits_test - np.max(logits_test, axis=1, keepdims=True))
     probs_test = exps_test / np.sum(exps_test, axis=1, keepdims=True)
 
@@ -156,8 +171,40 @@ for horizon in horizons:
     test_rmse = mean_squared_error(y_test, y_test_pred_cont, squared=False)
     test_mae = mean_absolute_error(y_test, y_test_pred_cont)
 
-    # Save
-    os.makedirs(model_dir, exist_ok=T
+    # Save predictions to CSV
+    val_predictions = pd.DataFrame({
+        'date': main_df.loc[val_idx, 'date'],
+        'ric': main_df.loc[val_idx, 'ric'],
+        'y_true': y_val,
+        'y_pred': y_val_pred_cont
+    })
+    test_predictions = pd.DataFrame({
+        'date': main_df.loc[test_idx, 'date'],
+        'ric': main_df.loc[test_idx, 'ric'],
+        'y_true': y_test,
+        'y_pred': y_test_pred_cont
+    })
+    val_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}.csv"), index=False)
+    test_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}_test.csv"), index=False)  # Optional separate test file
+
+    # Save final model
+    model.save_model(os.path.join(model_dir, f"model_five_best_{horizon}.json"))
+
+    # Save log loss for the best model
+    best_train_mlogloss = evals_result['train']['mlogloss'][-1]
+    best_val_mlogloss = evals_result['val']['mlogloss'][-1]
+    log_df_best = pd.DataFrame({
+        'dataset': ['train', 'val'],
+        'mlogloss': [best_train_mlogloss, best_val_mlogloss]
+    })
+    log_df_best.to_csv(os.path.join(model_dir, f"log_model_five_best_t+{horizon}.csv"), index=False)
+
+    # Save Optuna trials DataFrame
+    trials_df = study.trials_dataframe()
+    trials_df.to_csv(os.path.join(model_dir, f"optuna_trials_dataframe_t+{horizon}.csv"), index=False)
+
+    # Save metrics
+    os.makedirs(model_dir, exist_ok=True)
     metrics = pd.DataFrame([{
         "horizon": horizon,
         "val_rmse": val_rmse,
@@ -168,3 +215,17 @@ for horizon in horizons:
     metrics.to_csv(os.path.join(model_dir, f"regression_metrics_horizon_{horizon}.csv"), index=False)
     print(metrics)
     print(f"Best parameters for horizon {horizon}: {best_params}")
+
+    # Save log loss for each trial
+    for trial in study.trials:
+        trial_number = trial.number
+        train_mlogloss = trial.user_attrs.get('train_mlogloss', np.nan)
+        val_mlogloss = trial.user_attrs.get('val_mlogloss', np.nan)
+        log_df = pd.DataFrame({
+            'trial_number': [trial_number],
+            'train_mlogloss': [train_mlogloss],
+            'val_mlogloss': [val_mlogloss]
+        })
+        log_file = os.path.join(model_dir, f"logs_trial_{trial_number}_horizon_{horizon}.csv")
+        log_df.to_csv(log_file, index=False)
+        print(f"Saved log loss for trial {trial_number} to {log_file}")
