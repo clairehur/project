@@ -5,6 +5,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import os
 import optuna
+import gc  # Import garbage collector
 
 def cdf_emd_loss(preds, dtrain):
     labels = dtrain.get_label().astype(int)
@@ -41,7 +42,7 @@ def train_with_emd(X_train, y_train, X_val, y_val, params, K=5):
         dtrain,
         num_boost_round=params.get('num_boost_round', 500),
         evals=[(dtrain, 'train'), (dval, 'val')],
-        early_stopping_rounds=20,
+        early_stopping_rounds=50,
         verbose_eval=False,
         obj=cdf_emd_loss,
         evals_result=evals_result
@@ -53,13 +54,16 @@ def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_ce
     params = {
         'num_class': 5,
         'eval_metric': 'mlogloss',
-        'max_depth': trial.suggest_int('max_depth', 3, 10),
-        'eta': trial.suggest_float('eta', 0.01, 0.3, log=True),
+        'max_depth': trial.suggest_int('max_depth', 3, 5),
+        'learning_rate': trial.suggest_float('learning_rate', 0.008, 0.01, log=True),  # Replaced eta with learning_rate
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 5),  # Added min_child_weight
         'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-        'lambda': trial.suggest_float('lambda', 1e-3, 10.0, log=True),
-        'alpha': trial.suggest_float('alpha', 1e-3, 10.0, log=True),
-        'num_boost_round': trial.suggest_int('num_boost_round', 100, 1000)
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 1.0),  # Added colsample_bylevel
+        'colsample_bynode': trial.suggest_float('colsample_bynode', 0.7, 1.0),  # Added colsample_bynode
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 1, log=True),  # Renamed lambda to reg_lambda for clarity
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.01, 1, log=True),  # Renamed alpha to reg_alpha for clarity
+        'num_boost_round': trial.suggest_int('num_boost_round', 1000, 1100)
     }
 
     # Train model and get evaluation results
@@ -76,7 +80,7 @@ def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_ce
     exps_val = np.exp(logits_val - np.max(logits_val, axis=1, keepdims=True))
     probs_val = exps_val / np.sum(exps_val, axis=1, keepdims=True)
     y_val_pred_cont = np.dot(probs_val, bin_centers)
-    rmse = mean_squared_error(y_val, y_val_pred_cont, squared=False)
+    rmse = np.sqrt(np.mean((y_val - y_val_pred_cont) ** 2))
 
     # Store log loss for this trial
     trial.set_user_attr('train_mlogloss', train_mlogloss)
@@ -84,7 +88,7 @@ def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_ce
 
     return rmse
 
-horizons = [1]
+horizons = [1,5,10,15,20]
 download_dir = r"c:\Users\ZK79UWN\Downloads"
 model_dir = r"D:\xgb_custom_loss_ALL_ric_ALL_horizon"
 
@@ -99,7 +103,7 @@ for horizon in horizons:
         continue
 
     main_df = main_df.sort_values(by=['date', 'ric'])
-    main_df = main_df[~main_df[y_col].isna()]
+    main_df = main_df[~main_df[y_col].isin([0, 1])]
 
     X = main_df.drop(columns=[y_col, 'date', 'ric'])
     y = main_df[y_col]
@@ -166,26 +170,21 @@ for horizon in horizons:
     y_test_pred_cont = np.dot(probs_test, bin_centers)
 
     # Metrics
-    val_rmse = mean_squared_error(y_val, y_val_pred_cont, squared=False)
+    val_rmse = np.sqrt(np.mean((y_val - y_val_pred_cont) ** 2))
     val_mae = mean_absolute_error(y_val, y_val_pred_cont)
-    test_rmse = mean_squared_error(y_test, y_test_pred_cont, squared=False)
+    test_rmse = np.sqrt(np.mean((y_test - y_test_pred_cont) ** 2))
     test_mae = mean_absolute_error(y_test, y_test_pred_cont)
 
     # Save predictions to CSV
-    val_predictions = pd.DataFrame({
-        'date': main_df.loc[val_idx, 'date'],
-        'ric': main_df.loc[val_idx, 'ric'],
-        'y_true': y_val,
-        'y_pred': y_val_pred_cont
-    })
+  
     test_predictions = pd.DataFrame({
         'date': main_df.loc[test_idx, 'date'],
         'ric': main_df.loc[test_idx, 'ric'],
         'y_true': y_test,
         'y_pred': y_test_pred_cont
     })
-    val_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}.csv"), index=False)
-    test_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}_test.csv"), index=False)  # Optional separate test file
+
+    test_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}_test.csv"), index=False)
 
     # Save final model
     model.save_model(os.path.join(model_dir, f"model_five_best_{horizon}.json"))
@@ -229,3 +228,13 @@ for horizon in horizons:
         log_file = os.path.join(model_dir, f"logs_trial_{trial_number}_horizon_{horizon}.csv")
         log_df.to_csv(log_file, index=False)
         print(f"Saved log loss for trial {trial_number} to {log_file}")
+
+    # Memory management
+    del main_df, X, y, unique_dates, train_dates, val_dates, test_dates
+    del train_idx, val_idx, test_idx, X_train, X_val, X_test, y_train, y_val, y_test
+    del y_train_binned, y_val_binned, y_test_binned, scaler, bins, bin_centers
+    del study, best_params, model, evals_result, logits_val, logits_test
+    del exps_val, probs_val, exps_test, probs_test, y_val_pred_cont, y_test_pred_cont
+    del val_rmse, val_mae, test_rmse, test_mae, test_predictions
+    del metrics, log_df_best, trials_df, log_df
+    gc.collect()
