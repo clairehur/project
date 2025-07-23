@@ -129,12 +129,26 @@ for horizon in horizons:
     best_params['eval_metric'] = 'mlogloss'
     model = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, best_params, K=5)
 
-    # Predict
-    probs_val = model.predict(xgb.DMatrix(X_val))
-    probs_test = model.predict(xgb.DMatrix(X_test))
+    # Predict logits
+    logits_val = model.predict(xgb.DMatrix(X_val), output_margin=True)
+    logits_test = model.predict(xgb.DMatrix(X_test), output_margin=True)
 
-    y_val_pred_cont = np.dot(probs_val, bin_centers)
-    y_test_pred_cont = np.dot(probs_test, bin_centers)
+    # Reshape logits to (n_samples, K)
+    n_samples_val = X_val.shape[0]  # 329750
+    n_samples_test = X_test.shape[0]
+    logits_val = logits_val.reshape(n_samples_val, 5)
+    logits_test = logits_test.reshape(n_samples_test, 5)
+
+    # Apply softmax manually to get probabilities
+    exps_val = np.exp(logits_val - np.max(logits_val, axis=1, keepdims=True))
+    probs_val = exps_val / np.sum(exps_val, axis=1, keepdims=True)
+
+    exps_test = np.exp(logits_test - np.max(logits_test, axis=1, keepdims=True))
+    probs_test = exps_test / np.sum(exps_test, axis=1, keepdims=True)
+
+    # Calculate continuous predictions
+    y_val_pred_continuous = np.dot(probs_val, bin_centers)
+    y_test_pred_continuous = np.dot(probs_test, bin_centers)
 
     # Metrics
     val_rmse = mean_squared_error(y_val, y_val_pred_cont, squared=False)
@@ -143,8 +157,7 @@ for horizon in horizons:
     test_mae = mean_absolute_error(y_test, y_test_pred_cont)
 
     # Save
-    os.makedirs(model_dir, exist_ok=True)
-
+    os.makedirs(model_dir, exist_ok=T
     metrics = pd.DataFrame([{
         "horizon": horizon,
         "val_rmse": val_rmse,
