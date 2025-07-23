@@ -147,8 +147,8 @@ for horizon in horizons:
     probs_test = exps_test / np.sum(exps_test, axis=1, keepdims=True)
 
     # Calculate continuous predictions
-    y_val_pred_continuous = np.dot(probs_val, bin_centers)
-    y_test_pred_continuous = np.dot(probs_test, bin_centers)
+    y_val_pred_cont = np.dot(probs_val, bin_centers)
+    y_test_pred_cont = np.dot(probs_test, bin_centers)
 
     # Metrics
     val_rmse = mean_squared_error(y_val, y_val_pred_cont, squared=False)
