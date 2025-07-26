@@ -36,6 +36,13 @@ def train_with_emd(X_train, y_train, X_val, y_val, fixed_params, K=5):
 
     # Use evals_result to capture log loss
     evals_result = {}
+
+    def print_log_loss(env):
+        if env.iteration % 10 == 0:  # Print every 10 iterations for readability
+            train_mlogloss = env.evaluation_result_list[0][1]  # Train mlogloss
+            val_mlogloss = env.evaluation_result_list[1][1]    # Val mlogloss
+            print(f"Iteration {env.iteration}: Train mlogloss = {train_mlogloss:.4f}, Val mlogloss = {val_mlogloss:.4f}")
+
     model = xgb.train(
         fixed_params,
         dtrain,
@@ -44,7 +51,8 @@ def train_with_emd(X_train, y_train, X_val, y_val, fixed_params, K=5):
         early_stopping_rounds=50,
         verbose_eval=False,
         obj=cdf_emd_loss,
-        evals_result=evals_result
+        evals_result=evals_result,
+        callbacks=[print_log_loss]  # Add custom callback
     )
 
     return model, evals_result
