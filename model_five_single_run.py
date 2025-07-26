@@ -1,0 +1,197 @@
+import numpy as np
+import pandas as pd
+import xgboost as xgb
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error
+import os
+import gc  # Import garbage collector
+
+def cdf_emd_loss(preds, dtrain):
+    labels = dtrain.get_label().astype(int)
+    K = len(np.unique(labels))
+    preds = preds.reshape(-1, K)
+
+    # Softmax probabilities
+    exps = np.exp(preds - np.max(preds, axis=1, keepdims=True))
+    p = exps / np.sum(exps, axis=1, keepdims=True)
+
+    # One-hot encode true labels
+    y = np.zeros_like(p)
+    y[np.arange(len(labels)), labels] = 1
+
+    # Lower-triangular matrix to compute cumulative distribution
+    A = np.tril(np.ones((K, K)))
+
+    # EMD Gradient and Hessian (CDF formulation)
+    diff = p - y
+    g = (2.0 / K) * (A.T @ (A @ diff.T)).T
+    H_full = (2.0 / K) * (A.T @ A)
+    h = np.tile(np.diag(H_full), (len(labels), 1))
+
+    return g.reshape(-1), h.reshape(-1)
+
+def train_with_emd(X_train, y_train, X_val, y_val, fixed_params, K=5):
+    dtrain = xgb.DMatrix(X_train, label=y_train)
+    dval = xgb.DMatrix(X_val, label=y_val)
+
+    # Use evals_result to capture log loss
+    evals_result = {}
+    model = xgb.train(
+        fixed_params,
+        dtrain,
+        num_boost_round=1000,  # Fixed to 1000 boosting rounds
+        evals=[(dtrain, 'train'), (dval, 'val')],
+        early_stopping_rounds=50,
+        verbose_eval=False,
+        obj=cdf_emd_loss,
+        evals_result=evals_result
+    )
+
+    return model, evals_result
+
+horizons = [1, 5, 10, 15, 20]
+download_dir = r"c:\Users\ZK79UWN\Downloads"
+model_dir = r"D:\xgb_custom_loss_ALL_ric_ALL_horizon"
+
+# Fixed hyperparameters based on a hypothetical best trial (e.g., trial 1 with lowest val RMSE)
+# Assuming trial 1 had parameters near the lower end of ranges (adjust if you have exact values)
+fixed_params = {
+    'num_class': 5,
+    'eval_metric': 'mlogloss',
+    'max_depth': 3,  # Lower end of 3-5, adjust if trial 1 differed
+    'learning_rate': 0.0085,  # Slightly above 0.008, adjust if trial 1 differed
+    'min_child_weight': 1,  # Lower end of 1-5, adjust if trial 1 differed
+    'subsample': 0.7,  # Lower end of 0.5-1.0, adjust if trial 1 differed
+    'colsample_bytree': 0.7,  # Lower end of 0.7-1.0, adjust if trial 1 differed
+    'colsample_bylevel': 0.7,  # Lower end of 0.7-1.0, adjust if trial 1 differed
+    'colsample_bynode': 0.7,  # Lower end of 0.7-1.0, adjust if trial 1 differed
+    'reg_lambda': 0.05,  # Lower end of 0.01-1, log scale, adjust if trial 1 differed
+    'reg_alpha': 0.05,  # Lower end of 0.01-1, log scale, adjust if trial 1 differed
+    'num_boost_round': 1000  # Fixed as requested
+}
+
+for horizon in horizons:
+    main_df = get_merged_features(horizon, download_dir)  # Assuming this function is defined
+    if main_df is None:
+        continue
+
+    y_col = f'utilization_t+{horizon}'
+    if y_col not in main_df.columns:
+        print(f"Column {y_col} not found, skipping horizon {horizon}.")
+        continue
+
+    main_df = main_df.sort_values(by=['date', 'ric'])
+    main_df = main_df[~main_df[y_col].isin([0, 1])]
+
+    X = main_df.drop(columns=[y_col, 'date', 'ric'])
+    y = main_df[y_col]
+
+    # Split by date
+    unique_dates = main_df['date'].sort_values().unique()
+    n_dates = len(unique_dates)
+    train_end = int(0.6 * n_dates)
+    val_end = int(0.8 * n_dates)
+
+    train_dates = unique_dates[:train_end]
+    val_dates = unique_dates[train_end:val_end]
+    test_dates = unique_dates[val_end:]
+
+    train_idx = main_df['date'].isin(train_dates)
+    val_idx = main_df['date'].isin(val_dates)
+    test_idx = main_df['date'].isin(test_dates)
+
+    X_train, X_val, X_test = X[train_idx], X[val_idx], X[test_idx]
+    y_train, y_val, y_test = y[train_idx], y[val_idx], y[test_idx]
+
+    # Normalize
+    scaler = StandardScaler()
+    X_train = pd.DataFrame(scaler.fit_transform(X_train), columns=X.columns, index=X_train.index)
+    X_val = pd.DataFrame(scaler.transform(X_val), columns=X.columns, index=X_val.index)
+    X_test = pd.DataFrame(scaler.transform(X_test), columns=X.columns, index=X_test.index)
+
+    print(f"Horizon {horizon}: Train {X_train.shape}, Val {X_val.shape}, Test {X_test.shape}")
+
+    # Binning
+    bins = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    bin_centers = np.array([(bins[i] + bins[i + 1]) / 2 for i in range(len(bins) - 1)])
+
+    y_train_binned = pd.cut(y_train, bins=bins, labels=False, include_lowest=True)
+    y_val_binned = pd.cut(y_val, bins=bins, labels=False, include_lowest=True)
+    y_test_binned = pd.cut(y_test, bins=bins, labels=False, include_lowest=True)
+
+    # Train with fixed parameters
+    model, evals_result = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, fixed_params, K=5)
+    
+    # Extract log loss for all iterations
+    train_mlogloss_history = evals_result['train']['mlogloss']
+    val_mlogloss_history = evals_result['val']['mlogloss']
+
+    # Save log loss for this run with all boosting rounds
+    log_df = pd.DataFrame({
+        'horizon': [horizon] * len(train_mlogloss_history),
+        'boosting_round': list(range(len(train_mlogloss_history))),
+        'train_mlogloss': train_mlogloss_history,
+        'val_mlogloss': val_mlogloss_history
+    })
+    log_file = os.path.join(model_dir, f"logs_horizon_{horizon}.csv")
+    log_df.to_csv(log_file, index=False)
+    print(f"Saved iteration log loss for horizon {horizon} to {log_file}")
+
+    # Predict logits and calculate probabilities
+    logits_val = model.predict(xgb.DMatrix(X_val), output_margin=True)
+    logits_test = model.predict(xgb.DMatrix(X_test), output_margin=True)
+
+    n_samples_val = X_val.shape[0]
+    n_samples_test = X_test.shape[0]
+    logits_val = logits_val.reshape(n_samples_val, 5)
+    logits_test = logits_test.reshape(n_samples_test, 5)
+
+    exps_val = np.exp(logits_val - np.max(logits_val, axis=1, keepdims=True))
+    probs_val = exps_val / np.sum(exps_val, axis=1, keepdims=True)
+    exps_test = np.exp(logits_test - np.max(logits_test, axis=1, keepdims=True))
+    probs_test = exps_test / np.sum(exps_test, axis=1, keepdims=True)
+
+    # Calculate continuous predictions
+    y_val_pred_cont = np.dot(probs_val, bin_centers)
+    y_test_pred_cont = np.dot(probs_test, bin_centers)
+
+    # Metrics
+    val_rmse = np.sqrt(np.mean((y_val - y_val_pred_cont) ** 2))
+    val_mae = mean_absolute_error(y_val, y_val_pred_cont)
+    test_rmse = np.sqrt(np.mean((y_test - y_test_pred_cont) ** 2))
+    test_mae = mean_absolute_error(y_test, y_test_pred_cont)
+
+    # Save predictions to CSV
+    test_predictions = pd.DataFrame({
+        'date': main_df.loc[test_idx, 'date'],
+        'ric': main_df.loc[test_idx, 'ric'],
+        'y_true': y_test,
+        'y_pred': y_test_pred_cont
+    })
+    test_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}_test.csv"), index=False)
+
+    # Save final model with new naming convention
+    model.save_model(os.path.join(model_dir, f"model_five_{horizon}.json"))
+
+    # Save metrics
+    os.makedirs(model_dir, exist_ok=True)
+    metrics = pd.DataFrame([{
+        "horizon": horizon,
+        "val_rmse": val_rmse,
+        "val_mae": val_mae,
+        "test_rmse": test_rmse,
+        "test_mae": test_mae
+    }])
+    metrics.to_csv(os.path.join(model_dir, f"regression_metrics_horizon_{horizon}.csv"), index=False)
+    print(metrics)
+    print(f"Fixed parameters used for horizon {horizon}: {fixed_params}")
+
+    # Memory management
+    del main_df, X, y, unique_dates, train_dates, val_dates, test_dates
+    del train_idx, val_idx, test_idx, X_train, X_val, X_test, y_train, y_val, y_test
+    del y_train_binned, y_val_binned, y_test_binned, scaler, bins, bin_centers
+    del model, evals_result, logits_val, logits_test
+    del exps_val, probs_val, exps_test, probs_test, y_val_pred_cont, y_test_pred_cont
+    del val_rmse, val_mae, test_rmse, test_mae, test_predictions
+    del metrics
+    gc.collect()
