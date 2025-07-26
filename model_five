@@ -50,28 +50,39 @@ def train_with_emd(X_train, y_train, X_val, y_val, params, K=5):
 
     return model, evals_result
 
-def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_centers):
+def objective(trial, horizon, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_centers):
     params = {
         'num_class': 5,
         'eval_metric': 'mlogloss',
         'max_depth': trial.suggest_int('max_depth', 3, 5),
-        'learning_rate': trial.suggest_float('learning_rate', 0.008, 0.01, log=True),  # Replaced eta with learning_rate
-        'min_child_weight': trial.suggest_int('min_child_weight', 1, 5),  # Added min_child_weight
+        'learning_rate': trial.suggest_float('learning_rate', 0.008, 0.01, log=True),
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 5),
         'subsample': trial.suggest_float('subsample', 0.5, 1.0),
         'colsample_bytree': trial.suggest_float('colsample_bytree', 0.7, 1.0),
-        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 1.0),  # Added colsample_bylevel
-        'colsample_bynode': trial.suggest_float('colsample_bynode', 0.7, 1.0),  # Added colsample_bynode
-        'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 1, log=True),  # Renamed lambda to reg_lambda for clarity
-        'reg_alpha': trial.suggest_float('reg_alpha', 0.01, 1, log=True),  # Renamed alpha to reg_alpha for clarity
+        'colsample_bylevel': trial.suggest_float('colsample_bylevel', 0.7, 1.0),
+        'colsample_bynode': trial.suggest_float('colsample_bynode', 0.7, 1.0),
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.01, 1, log=True),
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.01, 1, log=True),
         'num_boost_round': trial.suggest_int('num_boost_round', 1000, 1100)
     }
 
     # Train model and get evaluation results
     model, evals_result = train_with_emd(X_train, y_train_binned, X_val, y_val_binned, params, K=5)
     
-    # Extract log loss for the last iteration
-    train_mlogloss = evals_result['train']['mlogloss'][-1]
-    val_mlogloss = evals_result['val']['mlogloss'][-1]
+    # Extract log loss for all iterations
+    train_mlogloss_history = evals_result['train']['mlogloss']
+    val_mlogloss_history = evals_result['val']['mlogloss']
+
+    # Save log loss for this trial with all boosting rounds
+    log_df = pd.DataFrame({
+        'trial_number': [trial.number] * len(train_mlogloss_history),
+        'boosting_round': list(range(len(train_mlogloss_history))),
+        'train_mlogloss': train_mlogloss_history,
+        'val_mlogloss': val_mlogloss_history
+    })
+    log_file = os.path.join(model_dir, f"logs_trial_{trial.number}_horizon_{horizon}.csv")
+    log_df.to_csv(log_file, index=False)
+    print(f"Saved iteration log loss for trial {trial.number} at horizon {horizon} to {log_file}")
 
     # Predict and calculate RMSE
     logits_val = model.predict(xgb.DMatrix(X_val), output_margin=True)
@@ -82,13 +93,9 @@ def objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_ce
     y_val_pred_cont = np.dot(probs_val, bin_centers)
     rmse = np.sqrt(np.mean((y_val - y_val_pred_cont) ** 2))
 
-    # Store log loss for this trial
-    trial.set_user_attr('train_mlogloss', train_mlogloss)
-    trial.set_user_attr('val_mlogloss', val_mlogloss)
-
     return rmse
 
-horizons = [1,5,10,15,20]
+horizons = [1, 5, 10, 15, 20]
 download_dir = r"c:\Users\ZK79UWN\Downloads"
 model_dir = r"D:\xgb_custom_loss_ALL_ric_ALL_horizon"
 
@@ -143,7 +150,7 @@ for horizon in horizons:
 
     # Optuna optimization
     study = optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective(trial, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_centers), n_trials=50)
+    study.optimize(lambda trial: objective(trial, horizon, X_train, y_train_binned, X_val, y_val_binned, y_val, bin_centers), n_trials=50)
 
     # Train final model with best parameters
     best_params = study.best_params
@@ -176,27 +183,16 @@ for horizon in horizons:
     test_mae = mean_absolute_error(y_test, y_test_pred_cont)
 
     # Save predictions to CSV
-  
     test_predictions = pd.DataFrame({
         'date': main_df.loc[test_idx, 'date'],
         'ric': main_df.loc[test_idx, 'ric'],
         'y_true': y_test,
         'y_pred': y_test_pred_cont
     })
-
     test_predictions.to_csv(os.path.join(model_dir, f"model_five_predicted_{horizon}_test.csv"), index=False)
 
     # Save final model
     model.save_model(os.path.join(model_dir, f"model_five_best_{horizon}.json"))
-
-    # Save log loss for the best model
-    best_train_mlogloss = evals_result['train']['mlogloss'][-1]
-    best_val_mlogloss = evals_result['val']['mlogloss'][-1]
-    log_df_best = pd.DataFrame({
-        'dataset': ['train', 'val'],
-        'mlogloss': [best_train_mlogloss, best_val_mlogloss]
-    })
-    log_df_best.to_csv(os.path.join(model_dir, f"log_model_five_best_t+{horizon}.csv"), index=False)
 
     # Save Optuna trials DataFrame
     trials_df = study.trials_dataframe()
@@ -215,20 +211,6 @@ for horizon in horizons:
     print(metrics)
     print(f"Best parameters for horizon {horizon}: {best_params}")
 
-    # Save log loss for each trial
-    for trial in study.trials:
-        trial_number = trial.number
-        train_mlogloss = trial.user_attrs.get('train_mlogloss', np.nan)
-        val_mlogloss = trial.user_attrs.get('val_mlogloss', np.nan)
-        log_df = pd.DataFrame({
-            'trial_number': [trial_number],
-            'train_mlogloss': [train_mlogloss],
-            'val_mlogloss': [val_mlogloss]
-        })
-        log_file = os.path.join(model_dir, f"logs_trial_{trial_number}_horizon_{horizon}.csv")
-        log_df.to_csv(log_file, index=False)
-        print(f"Saved log loss for trial {trial_number} to {log_file}")
-
     # Memory management
     del main_df, X, y, unique_dates, train_dates, val_dates, test_dates
     del train_idx, val_idx, test_idx, X_train, X_val, X_test, y_train, y_val, y_test
@@ -236,5 +218,5 @@ for horizon in horizons:
     del study, best_params, model, evals_result, logits_val, logits_test
     del exps_val, probs_val, exps_test, probs_test, y_val_pred_cont, y_test_pred_cont
     del val_rmse, val_mae, test_rmse, test_mae, test_predictions
-    del metrics, log_df_best, trials_df, log_df
+    del metrics, trials_df
     gc.collect()
