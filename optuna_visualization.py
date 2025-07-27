@@ -1,6 +1,6 @@
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, to_hex
 from matplotlib.cm import ScalarMappable
 from pandas.plotting import parallel_coordinates
 
@@ -25,7 +25,7 @@ cols = ['objective_value'] + hyperparams  # Axes order: objective first, then pa
 
 # Compute colors based on objective value (viridis colormap: dark blue low, yellow high; change to 'coolwarm' if preferred)
 norm = Normalize(vmin=plot_df['objective_value'].min(), vmax=plot_df['objective_value'].max())
-colors = [plt.cm.viridis(norm(val)) for val in plot_df['objective_value']]
+colors = [to_hex(plt.cm.viridis(norm(val))) for val in plot_df['objective_value']]  # Convert to hex for better compatibility
 
 # Plot the parallel coordinates
 fig, ax = plt.subplots(figsize=(12, 6))  # Adjust size as needed
